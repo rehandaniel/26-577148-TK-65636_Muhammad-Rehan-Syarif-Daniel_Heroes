@@ -1,0 +1,160 @@
+#include <Adafruit_NeoPixel.h>
+
+#define NEOPIXEL_PIN 6
+#define NUM_LEDS     8
+
+#define BTN_A_PIN    2   // Tombol Emergency 'A' (Interrupt)
+#define ENCODER_PIN  3   // Sinyal Pin Encoder (Interrupt/Digital)
+
+#define MOTOR_PWM    9   // L293D Enable 1,2
+#define MOTOR_IN1    4   // L293D Input 1
+#define MOTOR_IN2    5   // L293D Input 2
+
+// Prototip objek NeoPixel
+Adafruit_NeoPixel strip(NUM_LEDS, NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800);
+
+// Status Sistem
+volatile bool isLocked = false;
+volatile unsigned long lastEncoderPulse = 0;
+volatile long encoderPulses = 0;
+
+// Status Fault & Kontrol Motor
+bool isEncoderFault = false;
+int currentPWM = 0;         // 0 - 255
+bool isForward = true;      // true = Maju, false = Mundur
+
+// Timing Debounce & Fault Timeout
+const unsigned long FAULT_TIMEOUT = 400; // ms tanpa deteksi pulsa saat PWM > 0
+unsigned long lastDebounceA = 0;
+
+void setup() {
+  pinMode(BTN_A_PIN, INPUT_PULLUP);
+  pinMode(ENCODER_PIN, INPUT_PULLUP);
+  
+  pinMode(MOTOR_PWM, OUTPUT);
+  pinMode(MOTOR_IN1, OUTPUT);
+  pinMode(MOTOR_IN2, OUTPUT);
+
+  // Attach Interrupt untuk Tombol Emergency 'A' dan Encoder
+  attachInterrupt(digitalPinToInterrupt(BTN_A_PIN), handleButtonA, FALLING);
+  attachInterrupt(digitalPinToInterrupt(ENCODER_PIN), handleEncoder, RISING);
+
+  strip.begin();
+  strip.show();
+}
+
+// ----------------------------------------------------
+// ISR: Handling Tombol Emergency 'A' (Toggle/Unlatch)
+// ----------------------------------------------------
+void handleButtonA() {
+  if (millis() - lastDebounceA > 200) { // Anti-bounce
+    isLocked = !isLocked;
+    lastDebounceA = millis();
+  }
+}
+
+// ----------------------------------------------------
+// ISR: Handling Pulsa Encoder
+// ----------------------------------------------------
+void handleEncoder() {
+  encoderPulses++;
+  lastEncoderPulse = millis(); // Catat waktu terakhir encoder merespons
+}
+
+void loop() {
+  // 1. LOGIKA LOCKED STATE
+  if (isLocked) {
+    // Stop motor seketika
+    analogWrite(MOTOR_PWM, 0);
+    digitalWrite(MOTOR_IN1, LOW);
+    digitalWrite(MOTOR_IN2, LOW);
+
+    // Tampilkan indikator darurat (misal: LED berkedip Merah)
+    displayEmergencyVisual();
+    
+    // Abaikan seluruh input navigasi lain selama kondisi locked
+    return; 
+  }
+
+  // 2. BACA INPUT NAVIGASI (Sesuaikan dengan pin/input tombol navigasimu)
+  readNavigationInputs();
+
+  // Jalankan Motor L293D
+  analogWrite(MOTOR_PWM, currentPWM);
+  digitalWrite(MOTOR_IN1, isForward ? HIGH : LOW);
+  digitalWrite(MOTOR_IN2, isForward ? LOW : HIGH);
+
+  // 3. LOGIKA REDUNDANSI & FAULT DETECTION ENCODER
+  if (currentPWM > 0) {
+    // Jika ada perintah motor (PWM > 0) tapi sinyal encoder stuck
+    if (millis() - lastEncoderPulse > FAULT_TIMEOUT) {
+      isEncoderFault = true;
+    } else {
+      isEncoderFault = false;
+    }
+  } else {
+    // Jika motor diam, reset pemantau fault
+    isEncoderFault = false;
+    lastEncoderPulse = millis();
+  }
+
+  // 4. VISUALISASI NEOPIXEL
+  updateNeoPixelVisuals();
+}
+
+// ----------------------------------------------------
+// Fungsi Pembacaan Navigasi (Placeholder)
+// ----------------------------------------------------
+void readNavigationInputs() {
+  // Masukkan pembacaan tombol navigasi kamu di sini
+  // Variabel yang diubah: currentPWM (0–255) & isForward (true/false)
+}
+
+// ----------------------------------------------------
+// Visualisasi NeoPixel (Normal & Open-Loop Fallback)
+// ----------------------------------------------------
+void updateNeoPixelVisuals() {
+  int activeLEDs = 0;
+
+  if (!isEncoderFault) {
+    // Mode Normal: Hitung proporsi berdasarkan pembacaan riil encoder
+    // (Simulasi sederhana mapping pulsa/kecepatan aktual)
+    activeLEDs = map(getMeasuredSpeed(), 0, 100, 0, NUM_LEDS); 
+  } else {
+    // Open-Loop Fallback Mode: Menggunakan estimasi persentase PWM
+    activeLEDs = map(currentPWM, 0, 255, 0, NUM_LEDS);
+  }
+
+  strip.clear();
+
+  for (int i = 0; i < NUM_LEDS; i++) {
+    if (i < activeLEDs) {
+      if (isForward) {
+        strip.setPixelColor(i, strip.Color(0, 255, 0)); // Hijau = Maju
+      } else {
+        strip.setPixelColor(i, strip.Color(0, 0, 255)); // Biru = Mundur
+      }
+    }
+  }
+
+  // Jika masuk mode Fallback (Encoder Error), beri indikator warna Oranye di LED paling akhir
+  if (isEncoderFault && activeLEDs > 0) {
+    strip.setPixelColor(NUM_LEDS - 1, strip.Color(255, 80, 0)); 
+  }
+
+  strip.show();
+}
+
+void displayEmergencyVisual() {
+  strip.clear();
+  // Merah Kedip / Solid saat Lock State
+  for (int i = 0; i < NUM_LEDS; i++) {
+    strip.setPixelColor(i, strip.Color(255, 0, 0));
+  }
+  strip.show();
+}
+
+int getMeasuredSpeed() {
+  // Logika sederhana menghitung estimasi kecepatan aktual dari encoderPulses
+  return min((int)(encoderPulses % 100), 100); 
+}
